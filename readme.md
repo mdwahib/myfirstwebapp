@@ -4,4 +4,11 @@
 
 This repo is used as a starter for a _very basic_ HTML web application using no front-end frameworks.
 
+## Running locally
+
+1. Install dependencies: `npm install`.
+2. Start the local server: `npm start`.
+
+The `npm start` script uses the built-in `node` runtime to serve the `src/` directory (see `serve.js`), so no extra global tools like `sirv` are required.
+
 This repo has a dev container. This means if you open it inside a [GitHub Codespace](https://github.com/features/codespaces), or using [VS Code with the remote containers extension](https://code.visualstudio.com/docs/remote/containers), it will be opened inside a container with all the dependencies already installed.

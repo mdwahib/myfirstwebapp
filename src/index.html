@@ -1,17 +1,338 @@
 <!DOCTYPE html>
 <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="styles.css" />
+    <title>Zoho Approvals Demo</title>
+  </head>
 
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="styles.css">
-  <title>Vanilla JavaScript App</title>
-</head>
+  <body>
+    <main class="page">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Zoho OAuth + People Approvals</p>
+          <h1>Pending approvals viewer</h1>
+          <p class="lede">
+            Use your Zoho client ID and secret to sign in via SSO and fetch your
+            pending approvals from the People API.
+          </p>
+        </div>
+        <div class="badge">Client-side demo</div>
+      </header>
 
-<body>
-  <main>
-    <h1>Vanilla JavaScript App</h1>
-  </main>
-</body>
+      <section class="panel">
+        <div class="panel__header">
+          <h2>OAuth configuration</h2>
+          <p>Values are stored locally in your browser for convenience.</p>
+        </div>
+        <form id="config-form" class="form-grid">
+          <label>
+            <span>Accounts domain</span>
+            <select id="accounts-domain" required>
+              <option value="accounts.zoho.com">accounts.zoho.com</option>
+              <option value="accounts.zoho.eu">accounts.zoho.eu</option>
+              <option value="accounts.zoho.in">accounts.zoho.in</option>
+              <option value="accounts.zoho.com.cn">accounts.zoho.com.cn</option>
+              <option value="accounts.zoho.com.au">accounts.zoho.com.au</option>
+            </select>
+          </label>
+          <label>
+            <span>Client ID</span>
+            <input id="client-id" type="text" autocomplete="off" required />
+          </label>
+          <label>
+            <span>Client secret</span>
+            <input
+              id="client-secret"
+              type="password"
+              autocomplete="off"
+              required
+            />
+          </label>
+          <label>
+            <span>Redirect URI</span>
+            <input id="redirect-uri" type="url" required />
+          </label>
+          <label>
+            <span>Scope</span>
+            <input
+              id="scope"
+              type="text"
+              value="ZohoPeople.approvals.READ"
+              required
+            />
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="button">Save config</button>
+            <button type="button" id="login" class="button button--primary">
+              Sign in with Zoho
+            </button>
+          </div>
+          <p class="form-help">
+            The client secret is stored only in your browser's local storage.
+            For production apps use a secure backend to exchange tokens instead
+            of exposing secrets to the browser.
+          </p>
+        </form>
+      </section>
 
+      <section class="panel">
+        <div class="panel__header">
+          <h2>Tokens &amp; status</h2>
+          <p id="status" class="status">Not authenticated.</p>
+        </div>
+        <div class="token-grid">
+          <div>
+            <h3>Access token</h3>
+            <pre id="access-token" class="token-display">—</pre>
+          </div>
+          <div>
+            <h3>Refresh token</h3>
+            <pre id="refresh-token" class="token-display">—</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__header">
+          <h2>Pending approvals</h2>
+          <p>Fetches data from <code>/api/v3/approvals/_my_pending_approvals</code>.</p>
+        </div>
+        <div class="panel__actions">
+          <button id="fetch-approvals" class="button button--primary" disabled>
+            Refresh list
+          </button>
+        </div>
+        <div id="approvals" class="approvals">No data yet.</div>
+      </section>
+    </main>
+
+    <script>
+      const configForm = document.getElementById('config-form');
+      const loginButton = document.getElementById('login');
+      const fetchApprovalsButton = document.getElementById('fetch-approvals');
+      const statusEl = document.getElementById('status');
+      const approvalsEl = document.getElementById('approvals');
+      const accessTokenEl = document.getElementById('access-token');
+      const refreshTokenEl = document.getElementById('refresh-token');
+
+      const STORAGE_KEY = 'zoho-approvals-config';
+
+      function defaultRedirectUri() {
+        const { origin, pathname } = window.location;
+        return `${origin}${pathname}`;
+      }
+
+      function readConfig() {
+        const saved = window.localStorage.getItem(STORAGE_KEY);
+        if (!saved) return null;
+        try {
+          return JSON.parse(saved);
+        } catch (err) {
+          console.warn('Unable to read saved config', err);
+          return null;
+        }
+      }
+
+      function saveConfig(config) {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      }
+
+      function populateForm(config) {
+        const values = {
+          domain: 'accounts.zoho.com',
+          clientId: '',
+          clientSecret: '',
+          redirectUri: defaultRedirectUri(),
+          scope: 'ZohoPeople.approvals.READ',
+          ...config,
+        };
+
+        document.getElementById('accounts-domain').value = values.domain;
+        document.getElementById('client-id').value = values.clientId;
+        document.getElementById('client-secret').value = values.clientSecret;
+        document.getElementById('redirect-uri').value = values.redirectUri;
+        document.getElementById('scope').value = values.scope;
+      }
+
+      function getPeopleDomain(accountsDomain) {
+        if (!accountsDomain.startsWith('accounts.')) return 'people.zoho.com';
+        return accountsDomain.replace('accounts.', 'people.');
+      }
+
+      function buildAuthUrl({ domain, clientId, redirectUri, scope }) {
+        const params = new URLSearchParams({
+          scope,
+          client_id: clientId,
+          response_type: 'code',
+          access_type: 'offline',
+          prompt: 'consent',
+          redirect_uri: redirectUri,
+        });
+        return `https://${domain}/oauth/v2/auth?${params.toString()}`;
+      }
+
+      function showStatus(message, tone = 'neutral') {
+        statusEl.textContent = message;
+        statusEl.dataset.tone = tone;
+      }
+
+      async function exchangeCodeForToken(config, code) {
+        const params = new URLSearchParams({
+          grant_type: 'authorization_code',
+          client_id: config.clientId,
+          client_secret: config.clientSecret,
+          redirect_uri: config.redirectUri,
+          code,
+        });
+
+        const response = await fetch(`https://${config.domain}/oauth/v2/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: params.toString(),
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Token request failed: ${response.status} ${text}`);
+        }
+
+        return response.json();
+      }
+
+      async function fetchApprovals(config, accessToken) {
+        const peopleDomain = getPeopleDomain(config.domain);
+        const response = await fetch(
+          `https://${peopleDomain}/people/api/v3/approvals/_my_pending_approvals`,
+          {
+            headers: { Authorization: `Zoho-oauthtoken ${accessToken}` },
+          }
+        );
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(`Approvals request failed: ${response.status} ${text}`);
+        }
+
+        return response.json();
+      }
+
+      function renderApprovals(data) {
+        if (!data || !Array.isArray(data.data) || data.data.length === 0) {
+          approvalsEl.textContent = 'No pending approvals for this user.';
+          return;
+        }
+
+        const list = document.createElement('ul');
+        list.className = 'approval-list';
+
+        data.data.forEach((item) => {
+          const li = document.createElement('li');
+          li.innerHTML = `
+            <div class="approval__title">${item.approvalName || 'Untitled approval'}</div>
+            <div class="approval__meta">
+              <span>${item.type || '—'}</span>
+              <span>Requested on ${item.submittedOn || '—'}</span>
+            </div>
+          `;
+          list.appendChild(li);
+        });
+
+        approvalsEl.replaceChildren(list);
+      }
+
+      function updateTokens(tokens) {
+        accessTokenEl.textContent = tokens.access_token || '—';
+        refreshTokenEl.textContent = tokens.refresh_token || '—';
+        fetchApprovalsButton.disabled = !tokens.access_token;
+      }
+
+      configForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const config = {
+          domain: document.getElementById('accounts-domain').value,
+          clientId: document.getElementById('client-id').value.trim(),
+          clientSecret: document.getElementById('client-secret').value.trim(),
+          redirectUri: document.getElementById('redirect-uri').value.trim(),
+          scope: document.getElementById('scope').value.trim(),
+        };
+        saveConfig(config);
+        showStatus('Configuration saved.', 'success');
+      });
+
+      loginButton.addEventListener('click', () => {
+        const config = readConfig();
+        if (!config || !config.clientId || !config.clientSecret) {
+          showStatus('Enter and save your client ID & secret first.', 'warning');
+          return;
+        }
+
+        const authUrl = buildAuthUrl(config);
+        window.location.assign(authUrl);
+      });
+
+      fetchApprovalsButton.addEventListener('click', async () => {
+        const config = readConfig();
+        const accessToken = accessTokenEl.textContent;
+
+        if (!config || !accessToken || accessToken === '—') {
+          showStatus('Authenticate first to fetch approvals.', 'warning');
+          return;
+        }
+
+        showStatus('Loading approvals…');
+        approvalsEl.textContent = 'Requesting data from Zoho People…';
+        try {
+          const data = await fetchApprovals(config, accessToken);
+          renderApprovals(data);
+          showStatus('Approvals fetched successfully.', 'success');
+        } catch (err) {
+          console.error(err);
+          approvalsEl.textContent = err.message;
+          showStatus('Failed to load approvals.', 'error');
+        }
+      });
+
+      function handleAuthRedirect(config) {
+        const url = new URL(window.location.href);
+        const code = url.searchParams.get('code');
+        if (!code) return null;
+
+        url.searchParams.delete('code');
+        url.searchParams.delete('location');
+        window.history.replaceState({}, document.title, url.toString());
+        showStatus('Exchanging authorization code for tokens…');
+
+        return exchangeCodeForToken(config, code)
+          .then((tokens) => {
+            updateTokens(tokens);
+            showStatus('Authenticated! You can now fetch approvals.', 'success');
+          })
+          .catch((err) => {
+            console.error(err);
+            showStatus(err.message, 'error');
+          });
+      }
+
+      function init() {
+        const savedConfig = readConfig();
+        populateForm(savedConfig);
+
+        const config = readConfig();
+        if (config && config.redirectUri === '') {
+          config.redirectUri = defaultRedirectUri();
+          saveConfig(config);
+        }
+
+        if (config) {
+          handleAuthRedirect(config);
+        } else {
+          document.getElementById('redirect-uri').value = defaultRedirectUri();
+        }
+      }
+
+      init();
+    </script>
+  </body>
 </html>
