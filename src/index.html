@@ -47,7 +47,6 @@
               id="client-secret"
               type="password"
               autocomplete="off"
-              required
             />
           </label>
           <label>
@@ -63,6 +62,13 @@
               required
             />
           </label>
+          <label>
+            <span>OAuth response type</span>
+            <select id="response-type">
+              <option value="token">Implicit (access token in URL hash)</option>
+              <option value="code">Authorization code (exchange with secret)</option>
+            </select>
+          </label>
           <div class="form-actions">
             <button type="submit" class="button">Save config</button>
             <button type="button" id="login" class="button button--primary">
@@ -71,8 +77,9 @@
           </div>
           <p class="form-help">
             The client secret is stored only in your browser's local storage.
-            For production apps use a secure backend to exchange tokens instead
-            of exposing secrets to the browser.
+            Choose the implicit flow to avoid secrets, or use a secure backend
+            in production to exchange codes for tokens instead of exposing
+            secrets to the browser.
           </p>
         </form>
       </section>
@@ -146,6 +153,7 @@
           clientSecret: '',
           redirectUri: defaultRedirectUri(),
           scope: 'ZohoPeople.approvals.READ',
+          responseType: 'token',
           ...config,
         };
 
@@ -154,6 +162,7 @@
         document.getElementById('client-secret').value = values.clientSecret;
         document.getElementById('redirect-uri').value = values.redirectUri;
         document.getElementById('scope').value = values.scope;
+        document.getElementById('response-type').value = values.responseType;
       }
 
       function getPeopleDomain(accountsDomain) {
@@ -161,15 +170,25 @@
         return accountsDomain.replace('accounts.', 'people.');
       }
 
-      function buildAuthUrl({ domain, clientId, redirectUri, scope }) {
+      function buildAuthUrl({
+        domain,
+        clientId,
+        redirectUri,
+        scope,
+        responseType = 'token',
+      }) {
         const params = new URLSearchParams({
           scope,
           client_id: clientId,
-          response_type: 'code',
-          access_type: 'offline',
-          prompt: 'consent',
+          response_type: responseType,
           redirect_uri: redirectUri,
         });
+
+        if (responseType === 'code') {
+          params.set('access_type', 'offline');
+          params.set('prompt', 'consent');
+        }
+
         return `https://${domain}/oauth/v2/auth?${params.toString()}`;
       }
 
@@ -179,6 +198,10 @@
       }
 
       async function exchangeCodeForToken(config, code) {
+        if (!config.clientSecret) {
+          throw new Error('Client secret is required to exchange the code.');
+        }
+
         const params = new URLSearchParams({
           grant_type: 'authorization_code',
           client_id: config.clientId,
@@ -256,6 +279,7 @@
           clientSecret: document.getElementById('client-secret').value.trim(),
           redirectUri: document.getElementById('redirect-uri').value.trim(),
           scope: document.getElementById('scope').value.trim(),
+          responseType: document.getElementById('response-type').value,
         };
         saveConfig(config);
         showStatus('Configuration saved.', 'success');
@@ -263,8 +287,16 @@
 
       loginButton.addEventListener('click', () => {
         const config = readConfig();
-        if (!config || !config.clientId || !config.clientSecret) {
-          showStatus('Enter and save your client ID & secret first.', 'warning');
+        if (!config || !config.clientId) {
+          showStatus('Enter and save your client ID first.', 'warning');
+          return;
+        }
+
+        if (config.responseType === 'code' && !config.clientSecret) {
+          showStatus(
+            'Enter and save your client secret to use the authorization code flow.',
+            'warning'
+          );
           return;
         }
 
@@ -294,7 +326,36 @@
         }
       });
 
+      function parseImplicitTokens() {
+        if (!window.location.hash) return null;
+
+        const hash = window.location.hash.replace(/^#/, '');
+        const params = new URLSearchParams(hash);
+        if (!params.has('access_token')) return null;
+
+        const tokens = {
+          access_token: params.get('access_token'),
+          expires_in: params.get('expires_in'),
+          api_domain: params.get('api_domain'),
+          location: params.get('location'),
+          granted_for_session: params.get('granted_for_session'),
+        };
+
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.hash = '';
+        window.history.replaceState({}, document.title, cleanUrl.toString());
+
+        return tokens;
+      }
+
       function handleAuthRedirect(config) {
+        const implicitTokens = parseImplicitTokens();
+        if (implicitTokens) {
+          updateTokens(implicitTokens);
+          showStatus('Authenticated! Access token captured from redirect.', 'success');
+          return null;
+        }
+
         const url = new URL(window.location.href);
         const code = url.searchParams.get('code');
         if (!code) return null;
